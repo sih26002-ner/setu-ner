@@ -13,15 +13,22 @@ const PROTECTED_ROUTES = {
   '/api/admin/ingest-roads': ['super_admin'],
 }
 
-// Public routes - always accessible without login
+// Public PAGES - exact match, no login required
 const PUBLIC_ROUTES = ['/', '/login', '/map']
+
+// Public API PREFIXES - any route starting with these is readable without login
+// Only put read-only, non-sensitive data endpoints here
+const PUBLIC_API_PREFIXES = ['/api/map/']
 
 export async function middleware(request) {
  
   const { pathname } = request.nextUrl
 
   // Allow public routes through immediately - no auth check needed
-  const isPublicRoute = PUBLIC_ROUTES.some(route => pathname === route)
+    const isPublicRoute =
+    PUBLIC_ROUTES.some(route => pathname === route) ||
+    PUBLIC_API_PREFIXES.some(prefix => pathname.startsWith(prefix))
+
   if (isPublicRoute) {
     return NextResponse.next()
   }
