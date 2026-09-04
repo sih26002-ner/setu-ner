@@ -20,7 +20,13 @@ const IncidentSchema = z.object({
   reported_at: z.string().datetime().optional(),
 })
 
+// Two radii, two purposes:
+//  - MAX_SNAP_DISTANCE_M:   link the report to a specific road only if this close
+//  - JURISDICTION_RADIUS_M: the nearest mapped road within this range is used ONLY
+//                           to infer which district the point lies in.
+// Phase 2: replace the jurisdiction heuristic with ST_Contains against district polygons.
 const MAX_SNAP_DISTANCE_M = 5000
+const JURISDICTION_RADIUS_M = 50000
 
 // ---------- 2. Consistent error shape ----------
 function fail(status, code, message, extra = {}) {
@@ -82,21 +88,31 @@ export async function POST(request) {
       }
     }
 
-    // ---- Geospatial: snap the GPS point to the nearest road (real PostGIS query) ----
+    // ---- Geospatial: one query at the wide radius; derive both facts from it ----
     const { data: nearest, error: nearestError } = await supabase.rpc('find_nearest_road_segment', {
       p_lat: input.latitude,
       p_lng: input.longitude,
-      p_max_distance_m: MAX_SNAP_DISTANCE_M,
+      p_max_distance_m: JURISDICTION_RADIUS_M,
     })
     if (nearestError) throw new Error(`Nearest-road lookup failed: ${nearestError.message}`)
 
-    const road = nearest?.[0] ?? null
+    const nearestAny = nearest?.[0] ?? null                                   // for jurisdiction
+    const road = nearestAny && nearestAny.distance_m <= MAX_SNAP_DISTANCE_M   // for linkage
+      ? nearestAny
+      : null
 
-    // ---- Jurisdiction: officers report within their own district ----
-    if (road && road.district_id !== profile.district_id) {
+    // ---- Jurisdiction: decided from the nearest mapped road, even if too far to snap ----
+    if (!nearestAny) {
+      return fail(422, 'LOCATION_UNRESOLVED',
+        'No mapped road network within 50 km of this point. Check the pin position.',
+      )
+    }
+    if (nearestAny.district_id !== profile.district_id) {
       return fail(403, 'OUTSIDE_JURISDICTION',
-        `This location is on ${road.road_name} in ${road.district_name}, outside your assigned district.`,
-        { nearest_road: road })
+        `This location is closest to ${nearestAny.road_name} in ${nearestAny.district_name} ` +
+        `(~${(nearestAny.distance_m / 1000).toFixed(1)} km away), outside your assigned district.`,
+        { nearest_road: nearestAny },
+      )
     }
 
     // ---- Insert (through the user client so RLS is the final gate) ----
@@ -107,10 +123,10 @@ export async function POST(request) {
       // EWKT with explicit SRID. Longitude FIRST - PostGIS is (x, y).
       geometry: `SRID=4326;POINT(${input.longitude} ${input.latitude})`,
       road_segment_id: road?.road_segment_id ?? null,
-      district_id: road?.district_id ?? profile.district_id,
+      district_id: nearestAny.district_id,
       location_address: road
         ? `Near ${road.road_name}, ${road.district_name} (~${Math.round(road.distance_m)} m from road)`
-        : 'No mapped road within 5 km - pending admin review',
+        : `Unmapped location in ${nearestAny.district_name} (~${(nearestAny.distance_m / 1000).toFixed(1)} km from ${nearestAny.road_name}) - pending admin review`,
       reported_by: user.id,
       status: 'pending',
       offline_id: input.offline_id ?? null,
@@ -141,6 +157,11 @@ export async function POST(request) {
         ...insertPayload,
         accuracy_meters: input.accuracy_meters ?? null,
         snapped_distance_m: road?.distance_m ?? null,
+        jurisdiction_inferred_from: {
+          road_segment_id: nearestAny.road_segment_id,
+          road_name: nearestAny.road_name,
+          distance_m: nearestAny.distance_m,
+        },
       },
       ip_address: request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
       user_agent: request.headers.get('user-agent') ?? null,
@@ -169,7 +190,7 @@ export async function POST(request) {
           : null,
         message: road
           ? `Incident recorded on ${road.road_name}. Road risk recalculated.`
-          : 'Incident recorded. No mapped road within 5 km - an administrator will review the location.',
+          : `Incident recorded in ${nearestAny.district_name}. No mapped road within 5 km - an administrator will review the location.`,
       },
       { status: 201 },
     )
