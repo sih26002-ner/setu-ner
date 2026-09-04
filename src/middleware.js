@@ -10,6 +10,7 @@ const PROTECTED_ROUTES = {
   '/api/incidents': ['field_officer', 'district_admin', 'super_admin'],
   '/api/trips': ['driver', 'district_admin', 'super_admin'],
   '/api/alerts': ['district_admin', 'super_admin'],
+  '/api/admin/ingest-roads': ['super_admin'],
 }
 
 // Public routes - always accessible without login
