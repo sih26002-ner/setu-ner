@@ -16,6 +16,8 @@ const PROTECTED_ROUTES = {
 const PUBLIC_ROUTES = ['/', '/login', '/map']
 
 export async function middleware(request) {
+  console.log('🔒 MIDDLEWARE RUNNING FOR:', request.nextUrl.pathname)
+
   const { pathname } = request.nextUrl
 
   // Allow public routes through immediately - no auth check needed
